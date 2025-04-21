@@ -7,8 +7,17 @@ authors = [
     { name = "Tanush Chopra", email = "tchopra32@gatech.edu" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "inctxt",
+    "datasets>=2.16.0",
+    "transformers>=4.37.0",
+    "torch>=2.2.0",
+    "ipykernel>=6.29.5",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv.sources]
+inctxt = { git = "https://github.com/Multivaccc/llm-task-switch" }
