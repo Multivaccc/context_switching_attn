@@ -10,29 +10,28 @@ class ModelWrapper:
         self.device: str = device
         self.hooked: HookedTransformer = HookedTransformer.from_pretrained(model_name).to(device)
         self.tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-        
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        
         self.gen_model: AutoModelForCausalLM = AutoModelForCausalLM.from_pretrained(model_name).to(device)
         self.gen_model.eval()
+        self.gen_model.config.pad_token_id = self.tokenizer.eos_token_id
 
     def log_probs(
         self, 
         input_ids: torch.LongTensor
     ) -> torch.FloatTensor:
-        logits, cache = self.hooked.run_with_cache(input_ids)
-        return F.log_softmax(logits, dim=-1)  # shape (B, T, V)
+        logits = self.hooked.run(input_ids)
+        return F.log_softmax(logits, dim=-1)
 
     def sequence_log_prob(
         self, 
         input_ids: torch.LongTensor
     ) -> torch.FloatTensor:
-        logits, cache = self.hooked.run_with_cache(input_ids)
+        logits = self.hooked.run(input_ids)
         logps = F.log_softmax(logits, dim=-1)
         target_ids = input_ids[:,1:]
         token_logps = logps[:,:-1,:].gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
-        return token_logps.sum(dim=-1)  # (B,)
+        return token_logps.sum(dim=-1)
 
     def generate_greedy(
         self, 

@@ -3,13 +3,9 @@ from datasets import load_dataset
 
 class ParaphraseDataset(Dataset):
     def __init__(self, split="test", num_examples=None):
-        ds = load_dataset("paws", "labeled_final", split=split)
-
+        split_spec = f"{split}[:{num_examples}]" if num_examples else split
+        ds = load_dataset("paws", "labeled_final", split=split_spec)
         ds = ds.filter(lambda ex: ex["label"] == 1)
-
-        if num_examples is not None:
-            ds = ds.select(range(num_examples))
-
         self.items = [
             {
                 "prompt":    ex["sentence1"],

@@ -14,10 +14,10 @@ class ExperimentRunner:
 
     def run_base(self, tasks):
         records = []
-        # Disable autograd for the whole base run
+        raw_lists = { t["name"]: list(t["dataset"]) for t in tasks }
         with torch.inference_mode():
             for t in tqdm(tasks, desc="Tasks"):
-                examples = list(t["dataset"])
+                examples = raw_lists[t["name"]]
                 for L in tqdm(self.H, desc="History Lengths", leave=False):
                     hist_prompts = [ex["prompt"] for ex in examples[:L]]
                     if t["type"] == "clf":
@@ -39,13 +39,11 @@ class ExperimentRunner:
                         }
                         rec.update(metrics)
                     records.append(rec)
-
-        # cross-task tau matrix for classification tasks
         combs = list(combinations(tasks, 2))
         for t1, t2 in tqdm(combs, desc="Cross-task pairs"):
             for L in tqdm(self.H, desc="History Lengths", leave=False):
-                hist = [ex["prompt"] for ex in list(t1["dataset"])[:L]]
-                ex = list(t2["dataset"])[0]
+                hist = [ex["prompt"] for ex in raw_lists[t1["name"]][:L]]
+                ex = raw_lists[t2["name"]][0]
                 if t2["type"] == "clf":
                     logp0, _, _ = self._eval_clf([ex], [])
                     _, logph, _ = self._eval_clf([ex], hist)
@@ -64,7 +62,7 @@ class ExperimentRunner:
                     "src_task": t2["name"],
                     "tgt_task": t1["name"],
                     "history_length": L,
-                    "tau": -tau(logp0, logph) # Apply negative sign for the reverse direction
+                    "tau": -tau(logp0, logph)
                 })
         return records
 
@@ -72,7 +70,6 @@ class ExperimentRunner:
         logp0_list = []
         logph_list = []
         accs = []
-        
         for ex in tqdm(examples, desc="Examples", leave=False):
             prompt, choices, label = ex["prompt"], ex["choices"], ex["label"]
             lps0 = self._choice_logps("", prompt, choices)
@@ -80,7 +77,6 @@ class ExperimentRunner:
             logp0_list.append(lps0[label].item())
             logph_list.append(lpsH[label].item())
             accs.append(int(torch.argmax(lpsH).item() == label))
-        
         return (
             torch.tensor(logp0_list),
             torch.tensor(logph_list),
@@ -99,42 +95,30 @@ class ExperimentRunner:
     def _eval_gen(self, examples, history_prompts, task_type):
         refs, hyps, logp0_list, logph_list = [], [], [], []
         max_new = 50
-
-        for ex in tqdm(examples, desc="Examples", leave=False):
-            prompt, ref = ex["prompt"], ex["reference"]
-            ids0 = self.model.tokenizer(
-                prompt + ref,
-                return_tensors="pt",
-                padding=True
-            ).input_ids.to(self.device)
-            lp0 = self.model.sequence_log_prob(ids0)[0]
-
+        batch_size = 8
+        for i in range(0, len(examples), batch_size):
+            batch = examples[i:i+batch_size]
+            prompts = [ex["prompt"] for ex in batch]
+            refs_batch = [ex["reference"] for ex in batch]
+            input_texts0 = [p + r for p, r in zip(prompts, refs_batch)]
+            ids0 = self.model.tokenizer(input_texts0, return_tensors="pt", padding=True).input_ids.to(self.device)
+            lp0 = self.model.sequence_log_prob(ids0)
             hist_str = "".join(history_prompts)
-            idsH = self.model.tokenizer(
-                hist_str + prompt + ref,
-                return_tensors="pt",
-                padding=True
-            ).input_ids.to(self.device)
-            lpH = self.model.sequence_log_prob(idsH)[0]
-
-            hyp = self.model.generate_greedy(
-                [hist_str + prompt],
-                max_new_tokens=max_new
-            )[0]
-
-            refs.append(ref)
-            hyps.append(hyp)
-            logp0_list.append(lp0)
-            logph_list.append(lpH)
-
-        logp0 = torch.stack(logp0_list)
-        logph = torch.stack(logph_list)
-
+            input_textsH = [hist_str + p + r for p, r in zip(prompts, refs_batch)]
+            idsH = self.model.tokenizer(input_textsH, return_tensors="pt", padding=True).input_ids.to(self.device)
+            lpH = self.model.sequence_log_prob(idsH)
+            gen_prompts = [hist_str + p for p in prompts]
+            hyps_batch = self.model.generate_greedy(gen_prompts, max_new_tokens=max_new)
+            refs.extend(refs_batch)
+            hyps.extend(hyps_batch)
+            logp0_list.extend(lp0.cpu())
+            logph_list.extend(lpH.cpu())
+        logp0 = torch.stack([torch.tensor(x) for x in logp0_list])
+        logph = torch.stack([torch.tensor(x) for x in logph_list])
         if task_type == "code":
             m = exact_match(refs, hyps)
             metrics = {"exact_match": m}
         elif task_type == "qa":
-            # Use exact-match for QA too
             m = exact_match(refs, hyps)
             metrics = {"exact_match": m}
         else:
@@ -146,17 +130,19 @@ class ExperimentRunner:
                 "rougeL": rs["rougeL"],
                 "meteor": ms
             }
-
         return logp0, logph, metrics
 
     def run_extended(self, tasks):
         recs = []
+        raw_lists = { t["name"]: list(t["dataset"]) for t in tasks }
         combs = list(combinations(tasks, 2))
         for t1, t2 in tqdm(combs, desc="Extended pairs"):
             for (a, b) in tqdm(self.freqs, desc="Mix ratios", leave=False):
                 for L in tqdm(self.H, desc="History Lengths", leave=False):
-                    ex1 = list(t1["dataset"])[:L]
-                    ex2 = list(t2["dataset"])[:L]
+                    ex1 = raw_lists[t1["name"]][:L]
+                    ex2 = raw_lists[t2["name"]][:L]
+                    if not ex1:
+                        continue
                     hist = (
                         [e["prompt"] for _ in range(a) for e in ex1] +
                         [e["prompt"] for _ in range(b) for e in ex2]

@@ -3,10 +3,8 @@ from datasets import load_dataset
 
 class RottenTomatoesDataset(Dataset):
     def __init__(self, split="test", num_examples=None):
-        ds = load_dataset("rotten_tomatoes", split=split)
-        if num_examples:
-            ds = ds.select(range(num_examples))
-
+        split_spec = f"{split}[:{num_examples}]" if num_examples else split
+        ds = load_dataset("rotten_tomatoes", split=split_spec)
         # Rotten Tomatoes is a 2-way sentiment: 0=negative, 1=positive
         choices = ["negative", "positive"]
         self.items = [

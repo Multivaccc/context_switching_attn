@@ -1,4 +1,9 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+import tqdm
+tqdm.tqdm.monitor_interval = 0
+
 import torch
 from dotenv import load_dotenv
 from context_switching_attn.dataset.mmlu import MMLUDataset

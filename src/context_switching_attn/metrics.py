@@ -2,7 +2,10 @@ import torch
 from rouge_score import rouge_scorer
 from nltk.translate.meteor_score import meteor_score
 import nltk
-nltk.download("wordnet", quiet=True)
+try:
+    nltk.data.find("corpora/wordnet")
+except LookupError:
+    nltk.download("wordnet", quiet=True)
 
 def accuracy(preds: torch.Tensor, labels: torch.Tensor):
     return (preds == labels).float().mean().item()

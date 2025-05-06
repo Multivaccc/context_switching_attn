@@ -3,11 +3,8 @@ from datasets import load_dataset
 
 class TweetQADataset(Dataset):
     def __init__(self, split="test", num_examples=None):
-        # explicit repo to get the right schema
-        ds = load_dataset("ucsbnlp/tweet_qa", split=split)
-        if num_examples:
-            ds = ds.select(range(num_examples))
-
+        split_spec = f"{split}[:{num_examples}]" if num_examples else split
+        ds = load_dataset("ucsbnlp/tweet_qa", split=split_spec)
         self.items = []
         for ex in ds:
             tweet    = ex.get("Tweet", "")

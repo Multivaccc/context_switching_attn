@@ -25,10 +25,8 @@ class MMLUDataset(Dataset):
           num_examples: cap how many examples to load
         """
         # load the raw HF dataset (split=name, config=subjects)
-        ds = load_dataset("cais/mmlu", subjects, split=split)
-        if num_examples:
-            ds = ds.select(range(num_examples))
-
+        split_spec = f"{split}[:{num_examples}]" if num_examples else split
+        ds = load_dataset("cais/mmlu", subjects, split=split_spec)
         # now build a simple list of {prompt, choices, label}
         self.items: List[Dict] = []
         for ex in ds:
