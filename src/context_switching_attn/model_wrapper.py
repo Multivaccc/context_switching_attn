@@ -14,7 +14,7 @@ class ModelWrapper:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.gen_model: AutoModelForCausalLM = AutoModelForCausalLM.from_pretrained(model_name).to(device)
         self.gen_model.eval()
-        self.gen_model.config.pad_token_id = self.tokenizer.eos_token_id
+        self.gen_model.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
     def log_probs(
         self, 
