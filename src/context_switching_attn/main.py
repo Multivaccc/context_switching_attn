@@ -68,11 +68,10 @@ def main():
 
     # run experiments
     base_recs = runner.run_base(tasks)
-    ext_recs = runner.run_extended(tasks)
     switch1_recs = runner.run_task_switching(tasks)
     switch2_recs = runner.run_two_distractor_switch(tasks)
 
-    all_recs = base_recs + ext_recs + switch1_recs + switch2_recs
+    all_recs = base_recs + switch1_recs + switch2_recs
 
     # save results
     out_dir = os.path.join('results', model_name)
@@ -84,7 +83,7 @@ def main():
     )
 
     # split for plotting
-    per_task_records   = [r for r in all_recs if r.get("phase")=="base" and "task" in r]
+    per_task_records = [r for r in all_recs if r.get("phase")=="base" and "task" in r]
     cross_task_records = [r for r in all_recs if r.get("phase")=="base" and "src_task" in r]
 
     plot_base_degradation(

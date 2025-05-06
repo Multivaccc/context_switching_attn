@@ -1,17 +1,18 @@
 from torch.utils.data import Dataset
-from datasets import load_dataset
+import datasets
 
 class ParaphraseDataset(Dataset):
     def __init__(self, split="test", num_examples=None):
         split_spec = f"{split}[:{num_examples}]" if num_examples else split
-        ds = load_dataset("paws", "labeled_final", split=split_spec)
-        ds = ds.filter(lambda ex: ex["label"] == 1)
+        raw = datasets.load_dataset("paws", "labeled_final", split=split_spec)
+        examples = list(raw)
+        filtered = [ex for ex in examples if ex["label"] == 1]
         self.items = [
             {
-                "prompt":    ex["sentence1"],
+                "prompt": ex["sentence1"],
                 "reference": ex["sentence2"],
             }
-            for ex in ds
+            for ex in filtered
         ]
     
     def __len__(self):

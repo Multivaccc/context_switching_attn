@@ -1,10 +1,10 @@
 from torch.utils.data import Dataset
-from datasets import load_dataset
+import datasets
 
 class CodeCompletionDataset(Dataset):
     def __init__(self, split="test", num_examples=None):
         split_spec = f"{split}[:{num_examples}]" if num_examples else split
-        ds = load_dataset("mbpp", split=split_spec)
+        ds = datasets.load_dataset("mbpp", split=split_spec)
         self.items = []
         for ex in ds:
             prompt = ex.get("text", ex.get("prompt", ""))

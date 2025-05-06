@@ -1,10 +1,10 @@
 from torch.utils.data import Dataset
-from datasets import load_dataset
+import datasets
 
 class RottenTomatoesDataset(Dataset):
     def __init__(self, split="test", num_examples=None):
         split_spec = f"{split}[:{num_examples}]" if num_examples else split
-        ds = load_dataset("rotten_tomatoes", split=split_spec)
+        ds = datasets.load_dataset("rotten_tomatoes", split=split_spec)
         # Rotten Tomatoes is a 2-way sentiment: 0=negative, 1=positive
         choices = ["negative", "positive"]
         self.items = [
