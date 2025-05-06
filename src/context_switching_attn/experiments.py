@@ -14,29 +14,31 @@ class ExperimentRunner:
 
     def run_base(self, tasks):
         records = []
-        for t in tqdm(tasks, desc="Tasks"):
-            examples = list(t["dataset"])
-            for L in tqdm(self.H, desc="History Lengths", leave=False):
-                hist_prompts = [ex["prompt"] for ex in examples[:L]]
-                if t["type"] == "clf":
-                    logp0, logph, acc = self._eval_clf(examples, hist_prompts)
-                    rec = {
-                        "phase": "base",
-                        "task": t["name"],
-                        "history_length": L,
-                        "accuracy": acc,
-                        "tau": tau(logp0, logph)
-                    }
-                else:
-                    logp0, logph, metrics = self._eval_gen(examples, hist_prompts, t["type"])
-                    rec = {
-                        "phase": "base",
-                        "task": t["name"],
-                        "history_length": L,
-                        "tau": tau(logp0, logph)
-                    }
-                    rec.update(metrics)
-                records.append(rec)
+        # Disable autograd for the whole base run
+        with torch.inference_mode():
+            for t in tqdm(tasks, desc="Tasks"):
+                examples = list(t["dataset"])
+                for L in tqdm(self.H, desc="History Lengths", leave=False):
+                    hist_prompts = [ex["prompt"] for ex in examples[:L]]
+                    if t["type"] == "clf":
+                        logp0, logph, acc = self._eval_clf(examples, hist_prompts)
+                        rec = {
+                            "phase": "base",
+                            "task": t["name"],
+                            "history_length": L,
+                            "accuracy": acc,
+                            "tau": tau(logp0, logph)
+                        }
+                    else:
+                        logp0, logph, metrics = self._eval_gen(examples, hist_prompts, t["type"])
+                        rec = {
+                            "phase": "base",
+                            "task": t["name"],
+                            "history_length": L,
+                            "tau": tau(logp0, logph)
+                        }
+                        rec.update(metrics)
+                    records.append(rec)
 
         # cross-task tau matrix for classification tasks
         combs = list(combinations(tasks, 2))
