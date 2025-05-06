@@ -109,9 +109,9 @@ def test_save_results(tmp_path):
 @pytest.fixture
 def base_and_switch_records():
     base = [{"phase":"base","task":"t1","history_length":0,"accuracy":1.0,"accuracy_se":0.0}]
-    sw1  = [{"phase":"switch1","target":"t1","distractor":"d1","order":"target_recent","L_target":0,"L_distractor":0,"accuracy":1.0,"accuracy_se":0.0},
+    sw1 = [{"phase":"switch1","target":"t1","distractor":"d1","order":"target_recent","L_target":0,"L_distractor":0,"accuracy":1.0,"accuracy_se":0.0},
             {"phase":"switch1","target":"t1","distractor":"d1","order":"target_recent","L_target":0,"L_distractor":2,"accuracy":0.8,"accuracy_se":0.1}]
-    sw2  = [{"phase":"switch2","target":"t1","distractor1":"d1","distractor2":"d2","order":"target_recent","L_target":0,"L_distractor":0,"accuracy":1.0,"accuracy_se":0.0},
+    sw2 = [{"phase":"switch2","target":"t1","distractor1":"d1","distractor2":"d2","order":"target_recent","L_target":0,"L_distractor":0,"accuracy":1.0,"accuracy_se":0.0},
             {"phase":"switch2","target":"t1","distractor1":"d1","distractor2":"d2","order":"target_recent","L_target":0,"L_distractor":2,"accuracy":0.7,"accuracy_se":0.2}]
     return base, sw1, sw2
 

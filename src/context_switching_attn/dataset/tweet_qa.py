@@ -7,9 +7,9 @@ class TweetQADataset(Dataset):
         ds = datasets.load_dataset("ucsbnlp/tweet_qa", split=split_spec)
         self.items = []
         for ex in ds:
-            tweet    = ex.get("Tweet", "")
+            tweet = ex.get("Tweet", "")
             question = ex.get("Question", "")
-            answers  = ex.get("Answer", [])
+            answers = ex.get("Answer", [])
             # take the first answer if available
             reference = answers[0] if isinstance(answers, list) and answers else ""
             prompt = f"{tweet} Question: {question}"
