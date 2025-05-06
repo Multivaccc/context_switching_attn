@@ -1,1 +1,9 @@
 *.pyc
+__pycache__/
+.venv/
+*.csv
+*.json
+*.xlsx
+*.xls
+*.parquet
+.env
