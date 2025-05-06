@@ -20,14 +20,16 @@ class ModelWrapper:
         self, 
         input_ids: torch.LongTensor
     ) -> torch.FloatTensor:
-        logits = self.hooked.run(input_ids)
+        logits = self.hooked(input_ids, return_type="logits")
+        # logits, _ = self.hooked.run_with_cache(input_ids)
         return F.log_softmax(logits, dim=-1)
 
     def sequence_log_prob(
         self, 
         input_ids: torch.LongTensor
     ) -> torch.FloatTensor:
-        logits = self.hooked.run(input_ids)
+        logits = self.hooked(input_ids, return_type="logits")
+        # logits, _ = self.hooked.run_with_cache(input_ids)
         logps = F.log_softmax(logits, dim=-1)
         target_ids = input_ids[:,1:]
         token_logps = logps[:,:-1,:].gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
