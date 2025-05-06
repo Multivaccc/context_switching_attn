@@ -62,7 +62,7 @@ class ExperimentRunner:
                     "src_task": t2["name"],
                     "tgt_task": t1["name"],
                     "history_length": L,
-                    "tau": tau(logp0, logph)
+                    "tau": -tau(logp0, logph) # Apply negative sign for the reverse direction
                 })
         return records
 
@@ -126,9 +126,13 @@ class ExperimentRunner:
             logph_list.append(lpH)
 
         logp0 = torch.stack(logp0_list)
-        logph = torch.stack(logp0_list)
+        logph = torch.stack(logph_list)
 
         if task_type == "code":
+            m = exact_match(refs, hyps)
+            metrics = {"exact_match": m}
+        elif task_type == "qa":
+            # Use exact-match for QA too
             m = exact_match(refs, hyps)
             metrics = {"exact_match": m}
         else:
@@ -156,8 +160,9 @@ class ExperimentRunner:
                         [e["prompt"] for _ in range(b) for e in ex2]
                     )
                     if t1["type"] == "clf":
-                        logp0, _, _ = self._eval_clf(ex1, [])
-                        _, logph, metrics = self._eval_clf(ex1, hist)
+                        logp0, _, acc0 = self._eval_clf(ex1, [])
+                        _, logph, accH = self._eval_clf(ex1, hist)
+                        metrics = {"accuracy": accH}
                     else:
                         logp0, _, _ = self._eval_gen(ex1, [], t1["type"])
                         _, logph, metrics = self._eval_gen(ex1, hist, t1["type"])

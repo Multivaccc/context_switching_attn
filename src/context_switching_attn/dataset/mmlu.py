@@ -32,13 +32,18 @@ class MMLUDataset(Dataset):
         # now build a simple list of {prompt, choices, label}
         self.items: List[Dict] = []
         for ex in ds:
-            question = ex["question"]            # string
-            choices  = ex["choices"]             # list[str]
-            label    = int(ex["answer"])         # int
+            q   = ex["question"]            # string
+            c   = ex["choices"]             # list[str]
+            ans = ex["answer"]              # e.g. "A" or integer index
+            # Map ClassLabel string to 0-based index if needed:
+            if isinstance(ans, str):
+                lbl = ord(ans) - ord("A")
+            else:
+                lbl = int(ans)
             self.items.append({
-                "prompt": question,
-                "choices": choices,
-                "label":   label,
+                "prompt":  q,
+                "choices": c,
+                "label":   lbl,
             })
 
     def __len__(self) -> int:

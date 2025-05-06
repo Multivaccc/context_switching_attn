@@ -7,7 +7,17 @@ class RottenTomatoesDataset(Dataset):
         if num_examples:
             ds = ds.select(range(num_examples))
 
-        self.items = [{"prompt": ex["text"], "label": int(ex["label"])} for ex in ds]
+        # Rotten Tomatoes is a 2-way sentiment: 0=negative, 1=positive
+        choices = ["negative", "positive"]
+        self.items = [
+            {
+                # include a natural cue for choice-based evaluation
+                "prompt": ex["text"] + " Sentiment: ",
+                "choices": choices,
+                "label":   int(ex["label"])
+            }
+            for ex in ds
+        ]
     
     def __len__(self):
         return len(self.items)
