@@ -1,138 +1,163 @@
 import os
 import json
-import csv
 import pytest
 import torch
-import matplotlib
-matplotlib.use('Agg')  # for headless plotting
 
-import datasets
-@pytest.fixture(autouse=True)
-def patch_load_dataset(monkeypatch):
-    def dummy_load_dataset(name, *args, split=None, trust_remote_code=None, name_arg=None, **kwargs):
-        # determine number of examples from split spec e.g. 'test[:N]'
-        num = 1
-        if isinstance(split, str) and '[' in split:
-            import re
-            m = re.search(r"\[:(\d+)\]", split)
-            if m:
-                num = int(m.group(1))
-        if name.startswith('cais/mmlu') or name == 'cais/mmlu':
-            return [{'question': f'q{i}', 'choices': ['A','B'], 'answer': 'A'} for i in range(num)]
-        if name == 'mbpp':
-            return [{'text': f't{i}', 'code': f'c{i}'} for i in range(num)]
-        if name == 'gigaword':
-            return [{'document': f'd{i}', 'summary': f's{i}'} for i in range(num)]
-        if name == 'paws':
-            return [{'sentence1': f's1_{i}', 'sentence2': f's2_{i}', 'label': 1} for i in range(num)]
-        if name == 'rotten_tomatoes':
-            return [{'text': f'text{i}', 'label': i % 2} for i in range(num)]
-        if name == 'ucsbnlp/tweet_qa':
-            return [{'Tweet': f't{i}', 'Question': f'q{i}', 'Answer': [f'a{i}']} for i in range(num)]
-        return []
-    monkeypatch.setattr(datasets, 'load_dataset', dummy_load_dataset)
+from context_switching_attn.model_wrapper import ModelWrapper
+from context_switching_attn.metrics import accuracy, exact_match, tau as tau_fn
+from context_switching_attn.experiments import wilson_interval, sensitivity_slope
+from context_switching_attn.utils import (
+    save_results,
+    plot_base_degradation,
+    plot_switch1_degradation,
+    plot_switch2_degradation,
+    plot_tau_matrix,
+)
 
-# Dataset shape tests
-from src.context_switching_attn.dataset.mmlu import MMLUDataset
-from src.context_switching_attn.dataset.rotten_tomatoes import RottenTomatoesDataset
-from src.context_switching_attn.dataset.gigaword import GigawordDataset
-from src.context_switching_attn.dataset.tweet_qa import TweetQADataset
-from src.context_switching_attn.dataset.code_completion import CodeCompletionDataset
-from src.context_switching_attn.dataset.paraphrase import ParaphraseDataset
+def test_classify_probs_sum_to_one():
+    mw = ModelWrapper("gpt2")
+    history = [{"role": "user", "content": "Hello"}]
+    choices = ["Yes", "No", "Maybe"]
+    pred, conf, probs = mw.classify(history, choices)
+    assert abs(sum(probs) - 1.0) < 1e-4
+    assert 0 <= pred < len(choices)
+    assert 0.0 <= conf <= 1.0
 
-@pytest.mark.parametrize("cls,kwargs,keys", [
-    (MMLUDataset, {"split":"test","subjects":"abstract_algebra","num_examples":5}, {"prompt","choices","label"}),
-    (CodeCompletionDataset, {"split":"test","num_examples":5}, {"prompt","reference"}),
-    (GigawordDataset, {"split":"test","num_examples":5}, {"prompt","reference"}),
-    (ParaphraseDataset, {"split":"test","num_examples":10}, {"prompt","reference"}),
-    (RottenTomatoesDataset, {"split":"test","num_examples":10}, {"prompt","choices","label"}),
-    (TweetQADataset, {"split":"test","num_examples":10}, {"prompt","reference"}),
+def test_generate_returns_nonempty_string():
+    mw = ModelWrapper("gpt2")
+    history = [{"role": "user", "content": "Once upon a time"}]
+    out = mw.generate(history, max_new_tokens=5)
+    assert isinstance(out, str)
+    assert len(out) > 0
+
+def test_metrics_basic_behaviour():
+    # accuracy
+    preds = torch.tensor([1, 2, 2, 1])
+    labels = torch.tensor([1, 2, 0, 1])
+    assert abs(accuracy(preds, labels) - 0.75) < 1e-6
+
+    # exact_match
+    refs = ["a", "b", "c"]
+    hyps = ["a", "x", "c"]
+    assert abs(exact_match(refs, hyps) - (2 / 3)) < 1e-6
+
+    # tau
+    logp0 = torch.tensor([0.0, 1.0, 2.0])
+    logph = torch.tensor([0.0, 0.5, 1.5])
+    expected = ((0.0 - 0.0) + (1.0 - 0.5) + (2.0 - 1.5)) / 3
+    assert abs(tau_fn(logp0, logph) - expected) < 1e-6
+
+    # wilson_interval
+    low0, high0 = wilson_interval(0.5, 0)
+    assert low0 == 0.0 and high0 == 0.0
+    low1, high1 = wilson_interval(0.5, 10)
+    assert 0.0 <= low1 <= high1 <= 1.0
+
+    # sensitivity_slope
+    assert sensitivity_slope([1], [2]) == 0.0
+    assert abs(sensitivity_slope([0, 1], [0, 2]) - 2.0) < 1e-6
+
+def test_save_results_writes_json_and_csv(tmp_path):
+    recs = [
+        {"a": 1, "b": 2},
+        {"a": 3, "c": 4},
+    ]
+    jpath = tmp_path / "out.json"
+    cpath = tmp_path / "out.csv"
+    save_results(recs, str(jpath), str(cpath))
+
+    # JSON contents
+    loaded = json.loads(jpath.read_text())
+    assert loaded == recs
+
+    # CSV header + rows
+    lines = cpath.read_text().splitlines()
+    header = lines[0].split(",")
+    # union of keys in insertion order: a, b, c
+    assert header == ["a", "b", "c"]
+    row1 = lines[1].split(",")
+    assert row1 == ["1", "2", ""]
+    row2 = lines[2].split(",")
+    assert row2 == ["3", "", "4"]
+
+def make_dummy_records():
+    recs = []
+    # base
+    for t in ("A", "B"):
+        for L in (0, 1, 2):
+            acc = 0.5 + 0.1 * L
+            low = max(0.0, acc - 0.05)
+            high = min(1.0, acc + 0.05)
+            recs.append({
+                "phase": "base",
+                "target": t,
+                "L_target": L,
+                "accuracy": acc,
+                "accuracy_ci_low": low,
+                "accuracy_ci_high": high,
+            })
+    # switch1
+    for t in ("A", "B"):
+        for Ld in (0, 1, 2):
+            acc = 0.4 + 0.05 * Ld
+            low = max(0.0, acc - 0.05)
+            high = min(1.0, acc + 0.05)
+            recs.append({
+                "phase": "switch1",
+                "target": t,
+                "distractor": "X",
+                "order": "distractor_recent",
+                "L_target": 0,
+                "L_distractor": Ld,
+                "accuracy": acc,
+                "accuracy_ci_low": low,
+                "accuracy_ci_high": high,
+            })
+    # switch2
+    for t in ("A", "B"):
+        for Ld in (0, 1, 2):
+            acc = 0.6 - 0.02 * Ld
+            low = max(0.0, acc - 0.05)
+            high = min(1.0, acc + 0.05)
+            recs.append({
+                "phase": "switch2",
+                "target": t,
+                "distractor": "X",
+                "order": "target_recent",
+                "L_target": 0,
+                "L_distractor": Ld,
+                "accuracy": acc,
+                "accuracy_ci_low": low,
+                "accuracy_ci_high": high,
+            })
+    return recs
+
+@pytest.mark.parametrize("func, args", [
+    (plot_base_degradation, ([r for r in make_dummy_records() if r["phase"] == "base"],)),
+    (plot_switch1_degradation, (
+        [r for r in make_dummy_records() if r["phase"] == "switch1"],
+        [r for r in make_dummy_records() if r["phase"] == "base"],
+    )),
+    (plot_switch2_degradation, (
+        [r for r in make_dummy_records() if r["phase"] == "switch2"],
+        [r for r in make_dummy_records() if r["phase"] == "base"],
+    )),
+    (plot_tau_matrix, ([r for r in make_dummy_records()],)),
 ])
-def test_dataset_shapes(cls, kwargs, keys):
-    ds = cls(**kwargs)
-    assert len(ds) == kwargs.get("num_examples", 1)
-    item = ds[0]
-    assert set(keys).issubset(item.keys())
 
-# Skip heavy ModelWrapper load
-@pytest.mark.skip(reason="Skip ModelWrapper in unit tests")
-def test_model_wrapper_smoke():
-    from src.context_switching_attn.model_wrapper import ModelWrapper
-    mw = ModelWrapper("gpt2", device="cpu")
-    ids = mw.tokenizer("test", return_tensors="pt").input_ids
-    lp = mw.sequence_log_prob(ids)
-    assert lp.numel() >= 1
+def test_plot_functions_do_not_crash_and_create_files(tmp_path, func, args):
+    outdir = tmp_path / "plots"
+    os.makedirs(outdir, exist_ok=True)
+    func(*args, str(outdir), model_name="test")
+    files = os.listdir(str(outdir))
+    assert any(f.endswith(".png") for f in files)
 
-# Metrics tests
-from src.context_switching_attn.metrics import accuracy, tau, exact_match, rouge, meteor
-
-def test_accuracy():
-    preds = torch.tensor([1,2,3])
-    labels = torch.tensor([1,2,0])
-    assert accuracy(preds, labels) == pytest.approx(2/3)
-
-def test_tau():
-    logp0 = torch.tensor([0.,1.,2.])
-    logph = torch.tensor([1.,1.,1.])
-    assert tau(logp0, logph) == pytest.approx(((-1)+0+1)/3)
-
-def test_exact_match():
-    refs = ["a","b","c"]
-    hyps = ["a","wrong","c"]
-    assert exact_match(refs, hyps) == pytest.approx(2/3)
-
-def test_rouge_and_meteor():
-    refs = ["the cat sat","hello world"]
-    hyps = ["the cat sat","hello"]
-    r = rouge(refs, hyps)
-    assert set(r.keys()) == {"rouge1","rouge2","rougeL"}
-    for v in r.values():
-        assert 0.0 <= v <= 1.0
-    m = meteor(refs, hyps)
-    assert m >= 0.0
-
-# Utils tests
-from src.context_switching_attn.utils import save_results, plot_base_degradation, plot_tau_matrix, plot_switch1_degradation, plot_switch2_degradation
-
-def test_save_results(tmp_path):
-    records = [{"a":1,"b":2},{"b":3,"c":4}]
-    j = tmp_path/"out.json"
-    c = tmp_path/"out.csv"
-    save_results(records, str(j), str(c))
-    assert j.exists() and c.exists()
-    with open(j) as f:
-        assert json.load(f) == records
-    with open(c) as f:
-        rows = list(csv.DictReader(f))
-    assert rows[0]["a"] == "1" and rows[1]["c"] == "4"
-
-@pytest.fixture
-def base_and_switch_records():
-    base = [{"phase":"base","task":"t1","history_length":0,"accuracy":1.0,"accuracy_se":0.0}]
-    sw1 = [{"phase":"switch1","target":"t1","distractor":"d1","order":"target_recent","L_target":0,"L_distractor":0,"accuracy":1.0,"accuracy_se":0.0},
-            {"phase":"switch1","target":"t1","distractor":"d1","order":"target_recent","L_target":0,"L_distractor":2,"accuracy":0.8,"accuracy_se":0.1}]
-    sw2 = [{"phase":"switch2","target":"t1","distractor1":"d1","distractor2":"d2","order":"target_recent","L_target":0,"L_distractor":0,"accuracy":1.0,"accuracy_se":0.0},
-            {"phase":"switch2","target":"t1","distractor1":"d1","distractor2":"d2","order":"target_recent","L_target":0,"L_distractor":2,"accuracy":0.7,"accuracy_se":0.2}]
-    return base, sw1, sw2
-
-def test_plot_base_and_tau(tmp_path, base_and_switch_records):
-    base, sw1, sw2 = base_and_switch_records
-    bd = tmp_path/"plots"/"base"
-    plot_base_degradation(base, str(bd))
-    assert (bd/"t1_base_degradation.png").exists()
-    tau_records=[{"phase":"base","src_task":"t1","tgt_task":"t2","tau":0.5},
-                 {"phase":"base","src_task":"t2","tgt_task":"t1","tau":-0.5}]
-    plot_tau_matrix(tau_records, str(bd))
-    assert (bd/"tau_matrix.png").exists()
-
-def test_plot_switch1(tmp_path, base_and_switch_records):
-    base, sw1, _ = base_and_switch_records
-    d1 = tmp_path/"plots"/"switch1"
-    plot_switch1_degradation(sw1, base, str(d1))
-    assert (d1/"t1_switch1_degradation.png").exists()
-
-def test_plot_switch2(tmp_path, base_and_switch_records):
-    base, sw1, sw2 = base_and_switch_records
-    d2 = tmp_path/"plots"/"switch2"
-    plot_switch2_degradation(sw2, base, str(d2))
-    assert (d2/"t1_switch2_degradation.png").exists()
+def test_plot_functions_empty_inputs(tmp_path, capsys):
+    outdir = tmp_path / "plots_empty"
+    os.makedirs(outdir, exist_ok=True)
+    plot_base_degradation([], str(outdir))
+    plot_switch1_degradation([], [], str(outdir))
+    plot_switch2_degradation([], [], str(outdir))
+    plot_tau_matrix([], str(outdir))
+    captured = capsys.readouterr()
+    assert "skipping" in captured.out.lower()

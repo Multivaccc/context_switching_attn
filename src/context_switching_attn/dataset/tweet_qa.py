@@ -1,22 +1,26 @@
 from torch.utils.data import Dataset
-import datasets
 
 class TweetQADataset(Dataset):
-    def __init__(self, split="test", num_examples=None):
-        split_spec = f"{split}[:{num_examples}]" if num_examples else split
-        ds = datasets.load_dataset("ucsbnlp/tweet_qa", split=split_spec)
+    def __init__(self, split="test", num_examples=5):
+        from datasets import load_dataset
+        from itertools import islice
+        ds_stream = load_dataset(
+            "ucsbnlp/tweet_qa",
+            split=split,
+            streaming=True,
+        )
+        examples = list(islice(ds_stream, num_examples))
+
         self.items = []
-        for ex in ds:
-            tweet = ex.get("Tweet", "")
+        for ex in examples:
+            tweet    = ex.get("Tweet", "")
             question = ex.get("Question", "")
-            answers = ex.get("Answer", [])
-            # take the first answer if available
-            reference = answers[0] if isinstance(answers, list) and answers else ""
-            prompt = f"{tweet} Question: {question}"
-            self.items.append({"prompt": prompt, "reference": reference})
+            answers  = ex.get("Answer", [])
+            prompt   = f"{tweet} Question: {question}"
+            self.items.append({"prompt": prompt, "reference": answers})
 
     def __len__(self):
         return len(self.items)
 
-    def __getitem__(self, i):
-        return self.items[i]
+    def __getitem__(self, idx):
+        return self.items[idx]

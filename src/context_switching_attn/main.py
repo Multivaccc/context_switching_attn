@@ -1,24 +1,12 @@
+import argparse
 import os
-os.environ['OMP_NUM_THREADS']   = '1'
-os.environ['MKL_NUM_THREADS']   = '1'
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
-os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
-
+import multiprocessing as mp
 import torch
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
 
-import tqdm
-tqdm.tqdm.monitor_interval = 0
-
-from context_switching_attn.dataset.mmlu import MMLUDataset
-from context_switching_attn.dataset.rotten_tomatoes import RottenTomatoesDataset
-from context_switching_attn.dataset.gigaword import GigawordDataset
-from context_switching_attn.dataset.tweet_qa import TweetQADataset
-from context_switching_attn.dataset.code_completion import CodeCompletionDataset
-from context_switching_attn.dataset.paraphrase import ParaphraseDataset
-from context_switching_attn.experiments import ExperimentRunner
-from context_switching_attn.utils import (
+from .experiments import run_task_switch_experiments
+import json
+import pandas as pd
+from .utils import (
     save_results,
     plot_base_degradation,
     plot_tau_matrix,
@@ -26,99 +14,90 @@ from context_switching_attn.utils import (
     plot_switch2_degradation,
 )
 
+SUPPORTED_TASKS = [
+    "code_completion",
+    # "gigaword",
+    "mmlu",
+    "paraphrase",
+    "rotten_tomatoes",
+    "tweet_qa",
+]
+
+def run_for_model(model_name, history_lengths, num_incontext, eval_size, seed, base_output):
+    model_dir = os.path.join(base_output, model_name)
+    os.makedirs(model_dir, exist_ok=True)
+    json_path = os.path.join(model_dir, "task_switch.json")
+    csv_path = os.path.join(model_dir, "task_switch.csv")
+
+    if os.path.exists(csv_path):
+        print(f"Results already exist at {csv_path}, loading results and generating plots...")
+        if os.path.exists(json_path):
+            with open(json_path, "r") as f:
+                records = json.load(f)
+        else:
+            df = pd.read_csv(csv_path)
+            records = df.to_dict(orient="records")
+    else:
+        records = run_task_switch_experiments(
+            model_name=model_name,
+            all_tasks=SUPPORTED_TASKS,
+            history_lengths=history_lengths,
+            num_incontext=num_incontext,
+            eval_size=eval_size,
+            seed=seed,
+        )
+        save_results(records, json_path, csv_path)
+        print(f"Saved {len(records)} records for {model_name} to {json_path} and {csv_path}")
+
+    # Plotting
+    base_records = [r for r in records if r.get("phase") == "base"]
+    switch1_records = [r for r in records if r.get("phase") == "switch1"]
+    switch2_records = [r for r in records if r.get("phase") == "switch2"]
+
+    # Output directory for plots
+    plots_dir = os.path.join(model_dir, "plots")
+    # Base degradation
+    plot_base_degradation(base_records, plots_dir, model_name)
+    # Tau matrix
+    plot_tau_matrix(records, plots_dir, model_name)
+    # Switch1 degradation
+    plot_switch1_degradation(switch1_records, base_records, plots_dir, model_name)
+    # Switch2 degradation
+    plot_switch2_degradation(switch2_records, base_records, plots_dir, model_name)
+
 def main():
-    # device setup
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model_name = 'gpt2'
-
-    # runner initialization
-    runner = ExperimentRunner(
-        model_name=model_name,
-        device=device,
-        history_lengths=[0, 2, 4, 6]
+    parser = argparse.ArgumentParser(description="Run and plot task-switching experiments across datasets for multiple models.")
+    parser.add_argument("--models", nargs='+', type=str, default=["gpt2"],
+        help="List of HuggingFace model names to run (default: gpt2)"
+    )
+    parser.add_argument("--history_lengths", nargs='+', type=int, default=[0, 1, 2, 3, 4, 5, 6],
+        help="List of in-context example counts to sweep"
+    )
+    parser.add_argument("--num_incontext", type=int, default=5,
+        help="Max number of in-context examples per dataset"
+    )
+    parser.add_argument("--eval_size", type=int, default=None,
+        help="Number of evaluation examples (None = default of each dataset)"
+    )
+    parser.add_argument("--seed", type=int, default=42,
+        help="Random seed multiplier (currently unused)"
+    )
+    parser.add_argument("--output_dir", type=str, default="results",
+        help="Base directory to save results"
     )
 
-    # define tasks
-    tasks = [
-        {
-            'name': 'mmlu_aa',
-            'dataset': MMLUDataset(split='test', subjects='abstract_algebra', num_examples=50),
-            'type': 'clf'
-        },
-        {
-            'name': 'rotten',
-            'dataset': RottenTomatoesDataset(split='test', num_examples=20),
-            'type': 'clf'
-        },
-        {
-            'name': 'gigaword',
-            'dataset': GigawordDataset(split='test', num_examples=20),
-            'type': 'sum'
-        },
-        {
-            'name': 'tweetqa',
-            'dataset': TweetQADataset(split='test', num_examples=20),
-            'type': 'qa'
-        },
-        {
-            'name': 'code_mbpp',
-            'dataset': CodeCompletionDataset(split='test', num_examples=20),
-            'type': 'code'
-        },
-        {
-            'name': 'para_paws',
-            'dataset': ParaphraseDataset(split='test', num_examples=20),
-            'type': 'para'
-        },
-    ]
+    args = parser.parse_args()
 
-    # run experiments
-    base_recs = runner.run_base(tasks)
-    switch1_recs = runner.run_task_switching(tasks)
-    switch2_recs = runner.run_two_distractor_switch(tasks)
+    for model in args.models:
+        run_for_model(
+            model_name=model,
+            history_lengths=args.history_lengths,
+            num_incontext=args.num_incontext,
+            eval_size=args.eval_size,
+            seed=args.seed,
+            base_output=args.output_dir,
+        )
 
-    all_recs = base_recs + switch1_recs + switch2_recs
 
-    # save results
-    out_dir = os.path.join('results', model_name)
-    os.makedirs(out_dir, exist_ok=True)
-    save_results(
-        all_recs,
-        os.path.join(out_dir, 'all.json'),
-        os.path.join(out_dir, 'all.csv')
-    )
-
-    # split for plotting
-    per_task_records = [r for r in all_recs if r.get("phase")=="base" and "task" in r]
-    cross_task_records = [r for r in all_recs if r.get("phase")=="base" and "src_task" in r]
-
-    plot_base_degradation(
-        per_task_records,
-        os.path.join(out_dir, 'plots', 'base'),
-        model_name=model_name
-    )
-
-    plot_tau_matrix(
-        cross_task_records,
-        os.path.join(out_dir, 'plots', 'base'),
-        model_name=model_name
-    )
-
-    plot_switch1_degradation(
-        switch1_recs,
-        base_recs,
-        os.path.join(out_dir, 'plots', 'switch1'),
-        model_name=model_name
-    )
-
-    plot_switch2_degradation(
-        switch2_recs,
-        base_recs,
-        os.path.join(out_dir, 'plots', 'switch2'),
-        model_name=model_name
-    )
-
-    print('Done.')
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -1,45 +1,82 @@
 import torch
-import torch.nn.functional as F
-from transformer_lens import HookedTransformer
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from typing import List
-import typing_extensions as te
 
 class ModelWrapper:
-    def __init__(self, model_name: str, device: str="cpu"):
-        self.device: str = device
-        self.hooked: HookedTransformer = HookedTransformer.from_pretrained(model_name).to(device)
-        self.tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
-        if self.tokenizer.pad_token is None:
+    """
+    Wraps a causal LM for both classification (choice-based) and generative tasks.
+    For classification, we score each choice by log-likelihood and pick the highest.
+    """
+
+    def __init__(self, model_name: str, device: str | None = None):
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+
+        self.device = device
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.gen_model: AutoModelForCausalLM = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-        self.gen_model.eval()
-        self.gen_model.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
-    def log_probs(
-        self, 
-        input_ids: torch.LongTensor
-    ) -> torch.FloatTensor:
-        logits = self.hooked(input_ids, return_type="logits")
-        # logits, _ = self.hooked.run_with_cache(input_ids)
-        return F.log_softmax(logits, dim=-1)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float32,
+        )
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
+        self.model.to(self.device).eval()
 
-    def sequence_log_prob(
-        self, 
-        input_ids: torch.LongTensor
-    ) -> torch.FloatTensor:
-        logits = self.hooked(input_ids, return_type="logits")
-        # logits, _ = self.hooked.run_with_cache(input_ids)
-        logps = F.log_softmax(logits, dim=-1)
-        target_ids = input_ids[:,1:]
-        token_logps = logps[:,:-1,:].gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
-        return token_logps.sum(dim=-1)
+    def _build_prompt(self, history: list[dict]) -> str:
+        # history: list of {"role": "user"/"assistant", "content": ...}
+        s = ""
+        for turn in history:
+            role = "User" if turn["role"] == "user" else "Assistant"
+            s += f"{role}: {turn['content']}\n"
+        return s
 
-    def generate_greedy(
-        self, 
-        prompts: List[str], 
-        max_new_tokens: int=50
-    ) -> List[str]:
-        inputs = self.tokenizer(prompts, return_tensors="pt", padding=True).to(self.device)
-        out = self.gen_model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
-        return [self.tokenizer.decode(o, skip_special_tokens=True) for o in out]
+    def classify(self, history: list[dict], choices: list[str]):
+        """
+        Returns: (pred_index, confidence, all_probs: list[float])
+        """
+        prompt = self._build_prompt(history)
+        device = self.device
+
+        # accumulate log-likelihood for each choice
+        llhs = []
+        for choice in choices:
+            text = prompt + choice
+            enc = self.tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=1024,
+            ).to(device)
+            with torch.no_grad():
+                outputs = self.model(**enc, labels=enc.input_ids)
+                # negative loss is sum log-probs over all tokens
+                llh = -outputs.loss.item() * enc.input_ids.shape[-1]
+            llhs.append(llh)
+
+        probs = torch.softmax(torch.tensor(llhs), dim=0)
+        pred = int(probs.argmax().item())
+        return pred, float(probs[pred].item()), [float(p) for p in probs]
+
+    def generate(self, history: list[dict], max_new_tokens: int = 64, pad_token_id: int = None):
+        """
+        Returns the raw generated string (for generative tasks).
+        """
+        prompt = self._build_prompt(history)
+        enc = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.pad_token_id
+        with torch.no_grad():
+            out = self.model.generate(
+                **enc,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=pad_token_id  # suppress warning
+            )
+        gen = self.tokenizer.decode(out[0, enc.input_ids.shape[-1]:], skip_special_tokens=True)
+        return gen.strip()

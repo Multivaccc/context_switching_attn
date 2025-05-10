@@ -1,276 +1,216 @@
-import torch
 import math
-from itertools import combinations
-from context_switching_attn.model_wrapper import ModelWrapper
-from context_switching_attn.metrics import tau, exact_match, rouge, meteor
+import numpy as np
+import torch
+from scipy.stats import norm
 from tqdm import tqdm
 
-class ExperimentRunner:
-    def __init__(self, model_name: str, device: str = "cpu", history_lengths=[0, 2, 4, 6]):
-        self.device = device
-        self.model = ModelWrapper(model_name, device)
-        self.H = history_lengths  # history lengths for both target and distractor
-        self.orders = ["target_recent", "distr_recent"]  # two orders: target most recent, or distractor most recent
+from .model_wrapper import ModelWrapper
+from .metrics import accuracy, exact_match, rouge, meteor
+from .prompt_loader import PromptLoader
 
-    def run_base(self, tasks):
-        records = []
-        raw_lists = {t["name"]: list(t["dataset"]) for t in tasks}
-        with torch.inference_mode():
-            for t in tqdm(tasks, desc="Tasks"):
-                examples = raw_lists[t["name"]]
-                n_ex = len(examples)
-                for L in tqdm(self.H, desc="History Lengths", leave=False):
-                    hist_prompts = [ex["prompt"] for ex in examples[:L]]
-                    # classification
-                    if t["type"] == "clf":
-                        logp0, logph, acc_mean, acc_se = self._eval_clf(examples, hist_prompts)
-                        delta = logp0 - logph
-                        tau_mean = delta.mean().item()
-                        tau_std = delta.std(unbiased=False).item()
-                        tau_se = tau_std / math.sqrt(delta.numel())
-                        rec = {
-                            "phase": "base",
-                            "task": t["name"],
-                            "history_length": L,
-                            "accuracy": acc_mean,
-                            "accuracy_se": acc_se,
-                            "tau": tau_mean,
-                            "tau_se": tau_se,
-                        }
-                    # generation / other
+def wilson_interval(p: float, n: int, z: float = 1.96):
+    """Wilson score interval for a proportion p over n trials."""
+    if n == 0:
+        return 0.0, 0.0
+    center = (p + z*z/(2*n)) / (1 + z*z/n)
+    half = (z * math.sqrt(p*(1-p)/n + z*z/(4*n*n))) / (1 + z*z/n)
+    return center - half, center + half
+
+def sensitivity_slope(xs: list[int], ys: list[float]) -> float:
+    """Return slope (dy/dx) of the best-fit line through (xs, ys)."""
+    if len(xs) < 2:
+        return 0.0
+    m, _ = np.polyfit(xs, ys, 1)
+    return float(m)
+
+def run_task_switch_experiments(
+    model_name: str,
+    all_tasks: list[str],
+    history_lengths: list[int],
+    num_incontext: int,
+    eval_size: int | None = None,
+    seed: int = 0,
+):
+    """
+    For each target task A and each distractor task B != A, runs:
+      - base:     L_target - history_lengths, no B
+      - switch1:  L_distractor - history_lengths, no A
+      - switch2:  L_target = L_distractor - history_lengths, with both A/B in two orders
+    Records accuracy (and CIs) for classification, or exact_match+rouge+meteor for generation,
+    then computes a sensitivity slope over history_lengths.
+    """
+    wrapper = ModelWrapper(model_name)
+    records = []
+
+    for target in tqdm(all_tasks, desc="Target tasks"):
+        for distractor in tqdm(all_tasks, desc=f"Distractors for {target}", leave=False):
+            if distractor == target:
+                continue
+
+            loader = PromptLoader(incontext=distractor, eval=target)
+            eval_prompts, references, choices_list = loader.load_eval(eval_size)
+
+            # Base: only target in-context
+            base_loader = PromptLoader(incontext=target, eval=target)
+            for L_t in tqdm(history_lengths, desc=f"Base L for {target}/{distractor}", leave=False):
+                hist_t = base_loader.load_incontext(min(L_t, num_incontext))
+                preds = []
+                for prompt, ref, choices in zip(eval_prompts, references, choices_list):
+                    chat = hist_t + [{"role": "user", "content": prompt}]
+                    if choices is None:
+                        preds.append(wrapper.generate(chat, pad_token_id=wrapper.tokenizer.pad_token_id))
                     else:
-                        logp0, logph, metrics = self._eval_gen(examples, hist_prompts, t["type"])
-                        delta = logp0 - logph
-                        tau_mean = delta.mean().item()
-                        tau_std = delta.std(unbiased=False).item()
-                        tau_se = tau_std / math.sqrt(delta.numel())
-                        rec = {
-                            "phase": "base",
-                            "task": t["name"],
-                            "history_length": L,
-                            "tau": tau_mean,
-                            "tau_se": tau_se,
-                        }
-                        rec.update(metrics)
+                        pred_idx, _, _ = wrapper.classify(chat, choices)
+                        preds.append(pred_idx)
+
+                n = len(preds)
+                if choices_list[0] is not None:
+                    # classification metrics
+                    acc = accuracy(torch.tensor(preds), torch.tensor(references))
+                    low, high = wilson_interval(acc, n)
+                    records.append({
+                        "phase": "base",
+                        "target": target,
+                        "distractor": None,
+                        "order": None,
+                        "L_target": L_t,
+                        "L_distractor": 0,
+                        "accuracy": acc,
+                        "accuracy_ci_low": low,
+                        "accuracy_ci_high": high,
+                    })
+                else:
+                    # generative metrics
+                    em = exact_match(references, preds)
+                    rouge_scores = rouge(references, preds)
+                    mtr = meteor(references, preds)
+                    rec = {
+                        "phase": "base",
+                        "target": target,
+                        "distractor": None,
+                        "order": None,
+                        "L_target": L_t,
+                        "L_distractor": 0,
+                        "exact_match": em,
+                        "meteor": mtr,
+                    }
+                    rec.update({f"rouge{k}": v for k, v in rouge_scores.items()})
                     records.append(rec)
 
-        # cross-task tau matrix
-        combs = list(combinations(tasks, 2))
-        for t1, t2 in tqdm(combs, desc="Cross-task pairs"):
-            for L in tqdm(self.H, desc="History Lengths", leave=False):
-                hist = [ex["prompt"] for ex in raw_lists[t1["name"]][:L]]
-                ex0 = raw_lists[t2["name"]][0:1]
-                # eval on a single example
-                if t2["type"] == "clf":
-                    logp0, _, _, _ = self._eval_clf(ex0, [])
-                    _, logph, _, _ = self._eval_clf(ex0, hist)
+            # Switch1: only distractor in-context
+            for L_d in tqdm(history_lengths, desc=f"Switch1 L for {target}/{distractor}", leave=False):
+                hist_d = loader.load_incontext(L_d)
+                preds = []
+                for prompt, ref, choices in zip(eval_prompts, references, choices_list):
+                    chat = hist_d + [{"role": "user", "content": prompt}]
+                    if choices is None:
+                        preds.append(wrapper.generate(chat, pad_token_id=wrapper.tokenizer.pad_token_id))
+                    else:
+                        pred_idx, _, _ = wrapper.classify(chat, choices)
+                        preds.append(pred_idx)
+
+                n = len(preds)
+                if choices_list[0] is not None:
+                    acc = accuracy(torch.tensor(preds), torch.tensor(references))
+                    low, high = wilson_interval(acc, n)
+                    records.append({
+                        "phase": "switch1",
+                        "target": target,
+                        "distractor": distractor,
+                        "order": "distractor_recent",
+                        "L_target": 0,
+                        "L_distractor": L_d,
+                        "accuracy": acc,
+                        "accuracy_ci_low": low,
+                        "accuracy_ci_high": high,
+                    })
                 else:
-                    logp0, _, _ = self._eval_gen(ex0, [], t2["type"])
-                    _, logph, _ = self._eval_gen(ex0, hist, t2["type"])
+                    em = exact_match(references, preds)
+                    rouge_scores = rouge(references, preds)
+                    mtr = meteor(references, preds)
+                    rec = {
+                        "phase": "switch1",
+                        "target": target,
+                        "distractor": distractor,
+                        "order": "distractor_recent",
+                        "L_target": 0,
+                        "L_distractor": L_d,
+                        "exact_match": em,
+                        "meteor": mtr,
+                    }
+                    rec.update({f"rouge{k}": v for k, v in rouge_scores.items()})
+                    records.append(rec)
 
-                tau_val = tau(logp0, logph)
-                records.append({
-                    "phase": "base",
-                    "src_task": t1["name"],
-                    "tgt_task": t2["name"],
-                    "history_length": L,
-                    "tau": tau_val
-                })
-                records.append({
-                    "phase": "base",
-                    "src_task": t2["name"],
-                    "tgt_task": t1["name"],
-                    "history_length": L,
-                    "tau": -tau_val
-                })
+            # Switch2: both in-context, two orders
+            for L in tqdm(history_lengths, desc=f"Switch2 L for {target}/{distractor}", leave=False):
+                hist_d = loader.load_incontext(L)
+                hist_t = PromptLoader(target, target).load_incontext(L)
+                for order in ("distractor_recent", "target_recent"):
+                    preds = []
+                    for prompt, ref, choices in zip(eval_prompts, references, choices_list):
+                        if order == "distractor_recent":
+                            chat = hist_d + hist_t + [{"role": "user", "content": prompt}]
+                        else:
+                            chat = hist_t + hist_d + [{"role": "user", "content": prompt}]
 
-        return records
+                        if choices is None:
+                            preds.append(wrapper.generate(chat, pad_token_id=wrapper.tokenizer.pad_token_id))
+                        else:
+                            pred_idx, _, _ = wrapper.classify(chat, choices)
+                            preds.append(pred_idx)
 
-    def _eval_clf(self, examples, history_prompts):
-        """
-        Returns: logp0 tensor, logph tensor, accuracy mean, accuracy se
-        """
-        logp0_list = []
-        logph_list = []
-        accs = []
-        for ex in tqdm(examples, desc="Examples", leave=False):
-            prompt, choices, label = ex["prompt"], ex["choices"], ex["label"]
-            lps0 = self._choice_logps("", prompt, choices)
-            lpsH = self._choice_logps("".join(history_prompts), prompt, choices)
-            logp0_list.append(lps0[label].item())
-            logph_list.append(lpsH[label].item())
-            accs.append(int(torch.argmax(lpsH).item() == label))
+                    n = len(preds)
+                    if choices_list[0] is not None:
+                        acc = accuracy(torch.tensor(preds), torch.tensor(references))
+                        low, high = wilson_interval(acc, n)
+                        records.append({
+                            "phase": "switch2",
+                            "target": target,
+                            "distractor": distractor,
+                            "order": order,
+                            "L_target": L,
+                            "L_distractor": L,
+                            "accuracy": acc,
+                            "accuracy_ci_low": low,
+                            "accuracy_ci_high": high,
+                        })
+                    else:
+                        em = exact_match(references, preds)
+                        rouge_scores = rouge(references, preds)
+                        mtr = meteor(references, preds)
+                        rec = {
+                            "phase": "switch2",
+                            "target": target,
+                            "distractor": distractor,
+                            "order": order,
+                            "L_target": L,
+                            "L_distractor": L,
+                            "exact_match": em,
+                            "meteor": mtr,
+                        }
+                        rec.update({f"rouge{k}": v for k, v in rouge_scores.items()})
+                        records.append(rec)
 
-        logp0 = torch.tensor(logp0_list)
-        logph = torch.tensor(logph_list)
-        accs_t = torch.tensor(accs, dtype=torch.float32)
-        mean = accs_t.mean().item()
-        std = accs_t.std(unbiased=False).item()
-        se = std / math.sqrt(accs_t.numel())
-        return logp0, logph, mean, se
+    # Compute a single sensitivity slope per (phase,target,distractor,order)
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for r in records:
+        key = (r["phase"], r["target"], r.get("distractor"), r.get("order"))
+        grouped[key].append(r)
 
-    def _choice_logps(self, hist, prompt, choices):
-        logps = []
-        for ch in choices:
-            seq = hist + prompt + ch
-            ids = self.model.tokenizer(seq, return_tensors="pt", padding=True).input_ids.to(self.device)
-            lp = self.model.sequence_log_prob(ids)[0]
-            logps.append(lp)
-        return torch.tensor(logps)
-
-    def _eval_gen(self, examples, history_prompts, task_type):
-        refs, hyps, logp0_list, logph_list = [], [], [], []
-        max_new = 50
-        batch_size = 8
-        for i in range(0, len(examples), batch_size):
-            batch = examples[i:i + batch_size]
-            prompts = [ex["prompt"] for ex in batch]
-            refs_batch = [ex["reference"] for ex in batch]
-            # log-prob no history
-            input0 = [p + r for p, r in zip(prompts, refs_batch)]
-            ids0 = self.model.tokenizer(input0, return_tensors="pt", padding=True).input_ids.to(self.device)
-            lp0 = self.model.sequence_log_prob(ids0)
-            # log-prob with history
-            hist_str = "".join(history_prompts)
-            inputH = [hist_str + p + r for p, r in zip(prompts, refs_batch)]
-            idsH = self.model.tokenizer(inputH, return_tensors="pt", padding=True).input_ids.to(self.device)
-            lpH = self.model.sequence_log_prob(idsH)
-            # generation
-            gen_prompts = [hist_str + p for p in prompts]
-            hyps_batch = self.model.generate_greedy(gen_prompts, max_new_tokens=max_new)
-
-            refs.extend(refs_batch)
-            hyps.extend(hyps_batch)
-            logp0_list.extend(lp0.cpu().tolist())
-            logph_list.extend(lpH.cpu().tolist())
-
-        logp0 = torch.tensor(logp0_list)
-        logph = torch.tensor(logph_list)
-        # pick metrics
-        if task_type in ("code", "qa"):
-            m_val = exact_match(refs, hyps)
-            metrics = {"exact_match": m_val}
+    for key, recs in grouped.items():
+        # choose xs = history length (use L_distractor for switch1, L_target otherwise)
+        xs = [
+            r["L_distractor"] if key[0] == "switch1" else r["L_target"]
+            for r in recs
+        ]
+        # use accuracy or exact_match as y
+        if "accuracy" in recs[0]:
+            ys = [r["accuracy"] for r in recs]
         else:
-            rouge_dict = rouge(refs, hyps)
-            meteor_val = meteor(refs, hyps)
-            metrics = {
-                "rouge1": rouge_dict["rouge1"],
-                "rouge2": rouge_dict["rouge2"],
-                "rougeL": rouge_dict["rougeL"],
-                "meteor": meteor_val
-            }
+            ys = [r["exact_match"] for r in recs]
+        slope = sensitivity_slope(xs, ys)
+        for r in recs:
+            r["sensitivity"] = slope
 
-        return logp0, logph, metrics
-
-    def run_task_switching(self, tasks):
-        recs = []
-        raw = {t["name"]: list(t["dataset"]) for t in tasks}
-        for target in tqdm(tasks, desc="Switch1: single distractor"):
-            tgt = target["name"]
-            examples = raw[tgt]
-            for distractor in tasks:
-                dst = distractor["name"]
-                if dst == tgt:
-                    continue
-                for L_t in self.H:
-                    hist_t = [ex["prompt"] for ex in examples[:L_t]]
-                    for L_d in self.H:
-                        hist_d = [ex["prompt"] for ex in raw[dst][:L_d]]
-                        for order in self.orders:
-                            hist = (hist_d + hist_t) if order == "target_recent" else (hist_t + hist_d)
-
-                            if target["type"] == "clf":
-                                logp0, logph, acc_mean, acc_se = self._eval_clf(examples, hist)
-                                delta = logp0 - logph
-                                tau_mean = delta.mean().item()
-                                tau_std = delta.std(unbiased=False).item()
-                                tau_se = tau_std / math.sqrt(delta.numel())
-                                rec = {
-                                    "phase": "switch1",
-                                    "target": tgt,
-                                    "distractor": dst,
-                                    "L_target": L_t,
-                                    "L_distractor": L_d,
-                                    "order": order,
-                                    "accuracy": acc_mean,
-                                    "accuracy_se": acc_se,
-                                    "tau": tau_mean,
-                                    "tau_se": tau_se,
-                                }
-                            else:
-                                logp0, logph, metrics = self._eval_gen(examples, hist, target["type"])
-                                delta = logp0 - logph
-                                tau_mean = delta.mean().item()
-                                tau_std = delta.std(unbiased=False).item()
-                                tau_se = tau_std / math.sqrt(delta.numel())
-                                rec = {
-                                    "phase": "switch1",
-                                    "target": tgt,
-                                    "distractor": dst,
-                                    "L_target": L_t,
-                                    "L_distractor": L_d,
-                                    "order": order,
-                                    "tau": tau_mean,
-                                    "tau_se": tau_se,
-                                }
-                                rec.update(metrics)
-                            recs.append(rec)
-        return recs
-
-    def run_two_distractor_switch(self, tasks):
-        recs = []
-        raw = {t["name"]: list(t["dataset"]) for t in tasks}
-        for target in tqdm(tasks, desc="Switch2: two distractors"):
-            tgt = target["name"]
-            examples = raw[tgt]
-            others = [t for t in tasks if t["name"] != tgt]
-            for d1, d2 in combinations(others, 2):
-                n1, n2 = d1["name"], d2["name"]
-                for L_t in self.H:
-                    hist_t = [ex["prompt"] for ex in examples[:L_t]]
-                    for L_d in self.H:
-                        hist_d1 = [ex["prompt"] for ex in raw[n1][:L_d]]
-                        hist_d2 = [ex["prompt"] for ex in raw[n2][:L_d]]
-                        hist_d = hist_d1 + hist_d2
-                        for order in self.orders:
-                            hist = (hist_d + hist_t) if order == "target_recent" else (hist_t + hist_d)
-
-                            if target["type"] == "clf":
-                                logp0, logph, acc_mean, acc_se = self._eval_clf(examples, hist)
-                                delta = logp0 - logph
-                                tau_mean = delta.mean().item()
-                                tau_std = delta.std(unbiased=False).item()
-                                tau_se = tau_std / math.sqrt(delta.numel())
-                                rec = {
-                                    "phase": "switch2",
-                                    "target": tgt,
-                                    "distractor1": n1,
-                                    "distractor2": n2,
-                                    "L_target": L_t,
-                                    "L_distractor": L_d,
-                                    "order": order,
-                                    "accuracy": acc_mean,
-                                    "accuracy_se": acc_se,
-                                    "tau": tau_mean,
-                                    "tau_se": tau_se,
-                                }
-                            else:
-                                logp0, logph, metrics = self._eval_gen(examples, hist, target["type"])
-                                delta = logp0 - logph
-                                tau_mean = delta.mean().item()
-                                tau_std = delta.std(unbiased=False).item()
-                                tau_se = tau_std / math.sqrt(delta.numel())
-                                rec = {
-                                    "phase": "switch2",
-                                    "target": tgt,
-                                    "distractor1": n1,
-                                    "distractor2": n2,
-                                    "L_target": L_t,
-                                    "L_distractor": L_d,
-                                    "order": order,
-                                    "tau": tau_mean,
-                                    "tau_se": tau_se,
-                                }
-                                rec.update(metrics)
-                            recs.append(rec)
-        return recs
+    return records
