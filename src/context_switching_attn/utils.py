@@ -1,6 +1,7 @@
 import os
 import json
 import csv
+import textwrap
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
@@ -26,19 +27,40 @@ def save_results(records: list, json_path: str, csv_path: str):
         for rec in records:
             writer.writerow(rec)
 
+def _place_legend(fig, ax, wrap_width=30):
+    # Wrap legend labels and place inside plot
+    handles, labels = ax.get_legend_handles_labels()
+    if not labels:
+        return
+    
+    wrapped_labels = ["\n".join(textwrap.wrap(lbl, wrap_width, break_long_words=False)) for lbl in labels]
+    
+    # Place legend inside the plot using ax.legend
+    # 'loc="best"' will try to find the least obstructive position.
+    ax.legend(
+        handles,
+        wrapped_labels,
+        loc='best', 
+        frameon=True,
+        fancybox=True,
+        shadow=True
+    )
+    
+    # Adjust layout to ensure everything fits.
+    # The previous rect=[0, 0, 1, 0.85] was to make space for the legend *above*.
+    # Now that the legend is inside, a standard tight_layout should suffice.
+    fig.tight_layout()
+
 def plot_base_degradation(base_records: list, out_dir: str, model_name: str = None):
     os.makedirs(out_dir, exist_ok=True)
-    # Group by target task
     by_task = defaultdict(list)
     for r in base_records:
         if r.get("phase") == "base" and "target" in r:
             by_task[r["target"]].append(r)
 
     for task, recs in by_task.items():
-        # Sort by L_target
         recs = sorted(recs, key=lambda x: x["L_target"])
-        # Pick metric in order of preference
-        for metric in ("accuracy", "exact_match", "rouge1", "tau"):
+        for metric in ("accuracy", "exact_match", "rouge1", "tau"):  # pick metric
             if any(metric in r for r in recs):
                 break
         else:
@@ -47,32 +69,30 @@ def plot_base_degradation(base_records: list, out_dir: str, model_name: str = No
         xs = [r["L_target"] for r in recs]
         ys = [r[metric] for r in recs]
 
-        plt.figure()
-        plt.plot(xs, ys, marker="o", label=metric)
+        fig, ax = plt.subplots()
+        ax.plot(xs, ys, marker="o", label=metric)
 
-        # confidence‐interval shading if present
         low_key = f"{metric}_ci_low"
         high_key = f"{metric}_ci_high"
         if all(low_key in r and high_key in r for r in recs):
             lows = [r[low_key] for r in recs]
             highs = [r[high_key] for r in recs]
-            plt.fill_between(xs, lows, highs, alpha=0.2)
+            ax.fill_between(xs, lows, highs, alpha=0.2)
 
-        plt.xlabel("History length")
-        plt.ylabel(metric)
+        ax.set_xlabel("History length")
+        ax.set_ylabel(metric)
         title = f"{task} - {metric} (base)"
         if model_name:
             title = f"{model_name}: {title}"
-        plt.title(title)
+        ax.set_title(title)
 
-        # legend on top
-        plt.legend(loc="upper center", bbox_to_anchor=(0.5, 1.15), ncol=1, frameon=False)
-        plt.tight_layout()
+        _place_legend(fig, ax)
 
         filename = f"{task}_base_degradation.png"
-        plt.savefig(os.path.join(out_dir, filename))
-        print(f"Saved {task} base degradation plot to {os.path.join(out_dir, filename)}")
-        plt.close()
+        path = os.path.join(out_dir, filename)
+        fig.savefig(path)
+        print(f"Saved {task} base degradation plot to {path}")
+        plt.close(fig)
 
 def plot_tau_matrix(records: list, out_dir: str, model_name: str = None):
     os.makedirs(out_dir, exist_ok=True)
@@ -91,7 +111,7 @@ def plot_tau_matrix(records: list, out_dir: str, model_name: str = None):
         if rec:
             mat[i, i] = rec.get("tau", rec.get("sensitivity", 0.0))
 
-    plt.figure(figsize=(6, 6))
+    fig, ax = plt.subplots(figsize=(6, 6))
     sns.heatmap(
         mat,
         xticklabels=tasks,
@@ -99,21 +119,22 @@ def plot_tau_matrix(records: list, out_dir: str, model_name: str = None):
         cmap="Pastel1",
         cbar_kws={"label": "tau"},
         square=True,
+        ax=ax
     )
-    plt.xticks(rotation=90)
+    plt.setp(ax.get_xticklabels(), rotation=90)
     title = "Tau matrix (base)"
     if model_name:
         title = f"{model_name}: {title}"
-    plt.title(title)
-    plt.tight_layout()
+    ax.set_title(title)
+
+    fig.tight_layout()
     path = os.path.join(out_dir, "tau_matrix.png")
-    plt.savefig(path)
+    fig.savefig(path)
     print(f"Saved tau matrix plot to {path}")
-    plt.close()
+    plt.close(fig)
 
 def plot_switch1_degradation(switch1_records: list, base_records: list, out_dir: str, model_name: str = None):
     os.makedirs(out_dir, exist_ok=True)
-    # zero‐shot baseline per target
     baseline = {}
     for r in base_records:
         if r.get("phase") == "base" and r.get("L_target") == 0 and "target" in r:
@@ -122,7 +143,6 @@ def plot_switch1_degradation(switch1_records: list, base_records: list, out_dir:
                     baseline[r["target"]] = r[m]
                     break
 
-    # group switch1 by target
     by_target = defaultdict(list)
     for r in switch1_records:
         if r.get("phase") == "switch1" and r.get("L_target") == 0 and "target" in r:
@@ -138,40 +158,41 @@ def plot_switch1_degradation(switch1_records: list, base_records: list, out_dir:
         else:
             continue
 
-        plt.figure()
-        for d in sorted({r["distractor"] for r in recs if "distractor" in r}):
+        fig, ax = plt.subplots()
+        distractors = sorted({r["distractor"] for r in recs if "distractor" in r})
+        # ncol = len(distractors) if distractors else 1 # This line is no longer needed for _place_legend
+        for d in distractors:
             series = sorted(
                 [r for r in recs if r.get("distractor") == d],
                 key=lambda x: x["L_distractor"],
             )
             xs = [r["L_distractor"] for r in series]
             ys = [(r[metric] - base_val) * 100.0 for r in series]
-            plt.plot(xs, ys, marker="o", label=d)
+            ax.plot(xs, ys, marker="o", label=d)
 
-            # CI shading
             low_key, high_key = f"{metric}_ci_low", f"{metric}_ci_high"
             if all(low_key in r and high_key in r for r in series):
                 lows = [(r[low_key] - base_val) * 100.0 for r in series]
                 highs = [(r[high_key] - base_val) * 100.0 for r in series]
-                plt.fill_between(xs, lows, highs, alpha=0.2)
+                ax.fill_between(xs, lows, highs, alpha=0.2)
 
-        plt.xlabel("Distractor history length")
-        plt.ylabel(f"{metric} % change")
+        ax.set_xlabel("Distractor history length")
+        ax.set_ylabel(f"{metric} % change")
         title = f"{target} - {metric} degradation (switch1)"
         if model_name:
             title = f"{model_name}: {title}"
-        plt.title(title)
-        plt.legend(loc="upper center", bbox_to_anchor=(0.5, 1.15), ncol=3, frameon=False)
-        plt.tight_layout()
+        ax.set_title(title)
+
+        _place_legend(fig, ax)
 
         filename = f"{target}_switch1_degradation.png"
-        plt.savefig(os.path.join(out_dir, filename))
-        print(f"Saved {target} switch1 degradation plot to {os.path.join(out_dir, filename)}")
-        plt.close()
+        path = os.path.join(out_dir, filename)
+        fig.savefig(path)
+        print(f"Saved {target} switch1 degradation plot to {path}")
+        plt.close(fig)
 
 def plot_switch2_degradation(switch2_records: list, base_records: list, out_dir: str, model_name: str = None):
     os.makedirs(out_dir, exist_ok=True)
-    # zero‐shot baseline per target
     baseline = {}
     for r in base_records:
         if r.get("phase") == "base" and r.get("L_target") == 0 and "target" in r:
@@ -180,7 +201,6 @@ def plot_switch2_degradation(switch2_records: list, base_records: list, out_dir:
                     baseline[r["target"]] = r[m]
                     break
 
-    # group switch2 by target
     by_target = defaultdict(list)
     for r in switch2_records:
         if (
@@ -201,7 +221,9 @@ def plot_switch2_degradation(switch2_records: list, base_records: list, out_dir:
         else:
             continue
 
-        plt.figure()
+        fig, ax = plt.subplots()
+        # labels = sorted({f"{r['distractor']} ({r['order']})" for r in recs}) # This line is no longer needed for _place_legend
+        # ncol = len(labels) if labels else 1 # This line is no longer needed for _place_legend
         for distractor, order in sorted({(r["distractor"], r["order"]) for r in recs}):
             series = sorted(
                 [r for r in recs if r.get("distractor") == distractor and r.get("order") == order],
@@ -209,24 +231,26 @@ def plot_switch2_degradation(switch2_records: list, base_records: list, out_dir:
             )
             xs = [r["L_distractor"] for r in series]
             ys = [(r[metric] - base_val) * 100.0 for r in series]
-            plt.plot(xs, ys, marker="o", label=f"{distractor} ({order})")
+            ax.plot(xs, ys, marker="o", label=f"{distractor} ({order})")
 
             low_key, high_key = f"{metric}_ci_low", f"{metric}_ci_high"
             if all(low_key in r and high_key in r for r in series):
                 lows = [(r[low_key] - base_val) * 100.0 for r in series]
                 highs = [(r[high_key] - base_val) * 100.0 for r in series]
-                plt.fill_between(xs, lows, highs, alpha=0.2)
+                ax.fill_between(xs, lows, highs, alpha=0.2)
 
-        plt.xlabel("Distractor history length")
-        plt.ylabel(f"{metric} % change")
+        ax.set_xlabel("Distractor history length")
+        ax.set_ylabel(f"{metric} % change")
         title = f"{target} - {metric} degradation (switch2)"
         if model_name:
             title = f"{model_name}: {title}"
-        plt.title(title)
-        plt.legend(loc="upper center", bbox_to_anchor=(0.5, 1.15), ncol=3, frameon=False)
-        plt.tight_layout()
+        ax.set_title(title)
+
+        _place_legend(fig, ax)
 
         filename = f"{target}_switch2_degradation.png"
-        plt.savefig(os.path.join(out_dir, filename))
-        print(f"Saved {target} switch2 degradation plot to {os.path.join(out_dir, filename)}")
-        plt.close()
+        path = os.path.join(out_dir, filename)
+        fig.savefig(path)
+        print(f"Saved {target} switch2 degradation plot to {path}")
+        plt.close(fig)
+
