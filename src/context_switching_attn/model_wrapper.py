@@ -7,7 +7,13 @@ class ModelWrapper:
     For classification, we score each choice by log-likelihood and pick the highest.
     """
 
-    def __init__(self, model_name: str, device: str | None = None):
+    def __init__(self, model_name: str, device: str | None = None, blackbox: bool = False):
+        self.blackbox = blackbox
+
+        if self.blackbox:
+            from openrouter import OpenRouterClient
+            self.client = OpenRouterClient(model_name)
+            return
         if device is None:
             if torch.cuda.is_available():
                 device = "cuda"
@@ -38,6 +44,8 @@ class ModelWrapper:
         return s
 
     def classify(self, history: list[dict], choices: list[str]):
+        if self.blackbox:
+            return self.client.classify(history, choices)
         """
         Returns: (pred_index, confidence, all_probs: list[float])
         """
@@ -65,6 +73,8 @@ class ModelWrapper:
         return pred, float(probs[pred].item()), [float(p) for p in probs]
 
     def generate(self, history: list[dict], max_new_tokens: int = 64, pad_token_id: int = None):
+        if self.blackbox:
+            return self.client.generate(history)
         """
         Returns the raw generated string (for generative tasks).
         """
