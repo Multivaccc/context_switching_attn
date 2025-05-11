@@ -7,8 +7,7 @@ from typing import List, Dict, Tuple
 class OpenRouterClient:
     def __init__(self, model_name: str):
         self.model_name = model_name
-        # self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.api_key = "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"
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
 
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
         self.headers = {
