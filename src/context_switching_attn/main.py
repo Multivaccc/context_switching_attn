@@ -23,7 +23,7 @@ SUPPORTED_TASKS = [
     "tweet_qa",
 ]
 
-def run_for_model(model_name, history_lengths, num_incontext, eval_size, seed, base_output):
+def run_for_model(model_name, history_lengths, num_incontext, eval_size, seed, base_output, blaxkbox):
     model_dir = os.path.join(base_output, model_name)
     os.makedirs(model_dir, exist_ok=True)
     json_path = os.path.join(model_dir, "task_switch.json")
@@ -45,6 +45,7 @@ def run_for_model(model_name, history_lengths, num_incontext, eval_size, seed, b
             num_incontext=num_incontext,
             eval_size=eval_size,
             seed=seed,
+            blackbox=blackbox,
         )
         save_results(records, json_path, csv_path)
         print(f"Saved {len(records)} records for {model_name} to {json_path} and {csv_path}")
@@ -85,6 +86,9 @@ def main():
     parser.add_argument("--output_dir", type=str, default="results",
         help="Base directory to save results"
     )
+    parser.add_argument("--blackbox", action="store_true",
+        help="Use blackbox model (default: False)"
+    )
 
     args = parser.parse_args()
 
@@ -96,6 +100,7 @@ def main():
             eval_size=args.eval_size,
             seed=args.seed,
             base_output=args.output_dir,
+            blackbox=args.blackbox,
         )
 
 

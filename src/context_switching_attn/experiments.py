@@ -30,6 +30,7 @@ def run_task_switch_experiments(
     num_incontext: int,
     eval_size: int | None = None,
     seed: int = 0,
+    blackbox: bool = False,
 ):
     """
     For each target task A and each distractor task B != A, runs:
@@ -39,7 +40,7 @@ def run_task_switch_experiments(
     Records accuracy (and CIs) for classification, or exact_match+rouge+meteor for generation,
     then computes a sensitivity slope over history_lengths.
     """
-    wrapper = ModelWrapper(model_name)
+    wrapper = ModelWrapper(model_name, blackbox=blackbox)
     records = []
 
     for target in tqdm(all_tasks, desc="Target tasks"):
